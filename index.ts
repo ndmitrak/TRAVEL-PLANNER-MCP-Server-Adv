@@ -1,64 +1,95 @@
 // src/index.ts
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { HttpServerTransport } from "@modelcontextprotocol/sdk/server/http.js";  // новый SSE/HTTP-транспорт
+import express from "express";
+import { randomUUID } from "node:crypto";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest, ListToolsRequest, CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema
-} from "@modelcontextprotocol/sdk/types.js";
 
-// 1) Настройка MCP-сервера
-const server = new Server(
-  { name: "travel-planner", version: "0.1.0" },
-  { capabilities: { tools: {} } }
+// 1) Создаём MCP-сервер и описываем инструменты
+const server = new McpServer({ name: "travel-planner", version: "0.1.0" });
+
+// Схемы
+const CreateItinerarySchema = z.object({
+  origin: z.string(),
+  destination: z.string(),
+  startDate: z.string(),
+  endDate: z.string(),
+  budget: z.number().optional(),
+  preferences: z.array(z.string()).optional(),
+});
+// … остальные схемы аналогично …
+
+// Регистрируем инструменты
+server.tool(
+  "create_itinerary",
+  CreateItinerarySchema,
+  async ({ origin, destination, startDate, endDate, budget, preferences }) => ({
+    content: [
+      {
+        type: "text",
+        text: `Created itinerary from ${origin} to ${destination}\n` +
+              `Dates: ${startDate}–${endDate}\n` +
+              `Budget: ${budget ?? "n/a"}\n` +
+              `Prefs: ${preferences?.join(", ") || "none"}`,
+      },
+    ],
+  })
 );
 
-// Описание инструментов
-const CreateItinerarySchema = z.object({ /* …ваши поля… */ });
-// … остальные схемы …
+// … server.tool("optimize_itinerary", ...), моторы для остальных инструментов …
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "create_itinerary",
-      description: "Create a trip",
-      inputSchema: zodToJsonSchema(CreateItinerarySchema),
-    },
-    // … другие инструменты …
-  ],
-}));
+// 2) Настраиваем Express и Streamable HTTP транспорт
+const app = express();
+app.use(express.json());
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  switch (name) {
-    case "create_itinerary": {
-      const it = CreateItinerarySchema.parse(args);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Trip planned: ${it.origin} → ${it.destination} (${it.startDate}—${it.endDate})`,
-          },
-        ],
-      };
-    }
-    // … кейсы остальных инструментов …
-    default:
-      return {
-        content: [{ type: "text", text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
+// Хранилище транс портов по sessionId
+const transports: Record<string, StreamableHTTPServerTransport> = {};
+
+// Все запросы (POST, GET, DELETE) на /mcp
+app.post("/mcp", async (req, res) => {
+  const sessionId = req.header("mcp-session-id");
+  let transport: StreamableHTTPServerTransport;
+
+  if (sessionId && transports[sessionId]) {
+    // существующий сеанс
+    transport = transports[sessionId];
+  } else if (!sessionId && isInitializeRequest(req.body)) {
+    // новый сеанс
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (newId) => { transports[newId] = transport; },
+    });
+    transport.onclose = () => { if (transport.sessionId) delete transports[transport.sessionId]; };
+    await server.connect(transport);
+  } else {
+    // некорректный запрос
+    return res.status(400).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Bad Request: invalid or missing mcp-session-id" },
+      id: null,
+    });
   }
+
+  // передать JSON-RPC тело в транспорт
+  await transport.handleRequest(req, res, req.body);
 });
 
-// 2) Запуск HTTP-транспорта с SSE/JSON-RPC
+const handleSession = async (req: express.Request, res: express.Response) => {
+  const sessionId = req.header("mcp-session-id");
+  if (!sessionId || !transports[sessionId]) {
+    return res.status(400).send("Invalid or missing mcp-session-id");
+  }
+  await transports[sessionId].handleRequest(req, res);
+};
+
+// SSE-канал для серверных сообщений
+app.get("/mcp", handleSession);
+app.delete("/mcp", handleSession);
+
 const port = Number(process.env.PORT) || 3000;
-const transport = new HttpServerTransport({ port });          // слушает SSE на GET /
-server.connect(transport).then(() => {
-  console.log(`✅ MCP SSE server listening on port ${port}`);
-}).catch(err => {
-  console.error("Failed to start MCP HTTP transport:", err);
-  process.exit(1);
+app.listen(port, "0.0.0.0", () => {
+  console.log(`✅ MCP Streamable HTTP server running on port ${port}`);
 });
