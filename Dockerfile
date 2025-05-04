@@ -1,22 +1,29 @@
-FROM node:22.12-alpine as builder
-
-COPY src/travel-planner /app
-COPY tsconfig.json /tsconfig.json
+# Этап сборки
+FROM node:22.12-alpine AS builder
 
 WORKDIR /app
 
-RUN --mount=type=cache,target=/root/.npm npm install
+# Копируем весь проект
+COPY . .
 
+# Устанавливаем зависимости и собираем TypeScript
+RUN npm install
+RUN npm run build
+
+# Этап запуска
 FROM node:22-alpine AS release
 
 WORKDIR /app
 
+# Копируем только нужные для запуска файлы
 COPY --from=builder /app/dist /app/dist
 COPY --from=builder /app/package.json /app/package.json
 COPY --from=builder /app/package-lock.json /app/package-lock.json
 
 ENV NODE_ENV=production
 
-RUN npm ci --ignore-scripts --omit-dev
+# Устанавливаем только runtime-зависимости
+RUN npm ci --ignore-scripts --omit=dev
 
-ENTRYPOINT ["node", "dist/index.js"] 
+# Запуск
+ENTRYPOINT ["node", "dist/index.js"]
