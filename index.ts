@@ -1,4 +1,3 @@
-// src/index.ts
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
@@ -8,11 +7,10 @@ import {
   CallToolRequestSchema,
   type ListToolsRequest,
   type CallToolRequest,
-  type Response
 } from '@modelcontextprotocol/sdk/types.js';
 
 ////////////////////////////////////////////////////////////////////////////////
-// 1) Опишите ваши схемы и логику инструментов точно так же, как вы это делали:
+// 1) Логика MCP-инструментов
 ////////////////////////////////////////////////////////////////////////////////
 
 const CreateItinerarySchema = z.object({
@@ -23,11 +21,11 @@ const CreateItinerarySchema = z.object({
   budget: z.number().optional(),
   preferences: z.array(z.string()).optional(),
 });
-// … остальные схемы …
 
-async function listToolsHandler(): Promise<Response> {
+// Функция-обработчик ListTools
+async function listToolsHandler() {
   return {
-    jsonrpc: '2.0',
+    jsonrpc: '2.0' as const,
     id: null,
     result: {
       tools: [
@@ -36,78 +34,72 @@ async function listToolsHandler(): Promise<Response> {
           description: 'Creates a personalized travel itinerary',
           inputSchema: zodToJsonSchema(CreateItinerarySchema),
         },
-        // … другие инструменты …
+        // …другие инструменты…
       ],
     },
   };
 }
 
-async function callToolHandler(req: CallToolRequest): Promise<Response> {
+// Функция-обработчик CallTool
+async function callToolHandler(req: CallToolRequest) {
   const { name, arguments: args, id } = req.params;
-  let resultContent;
   switch (name) {
     case 'create_itinerary': {
       const it = CreateItinerarySchema.parse(args);
-      resultContent = [
-        {
-          type: 'text',
-          text: `Created itinerary from ${it.origin} to ${it.destination}\nDates: ${it.startDate} – ${it.endDate}`,
+      return {
+        jsonrpc: '2.0' as const,
+        id,
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: `Created itinerary from ${it.origin} to ${it.destination}
+Dates: ${it.startDate} – ${it.endDate}
+Budget: ${it.budget ?? 'n/a'}`,
+            },
+          ],
         },
-      ];
-      break;
+      };
     }
     // … остальные кейсы …
     default:
       return {
-        jsonrpc: '2.0',
+        jsonrpc: '2.0' as const,
         id,
         error: { code: -32601, message: `Unknown tool: ${name}` },
       };
   }
-  return {
-    jsonrpc: '2.0',
-    id,
-    result: { content: resultContent },
-  };
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// 2) Реализуйте ручной SSE-канал и POST-endpoint для JSON-RPC
+// 2) SSE + JSON-RPC transport вручную
 ////////////////////////////////////////////////////////////////////////////////
 
 const app = express();
 app.use(express.json());
 
-// Хранилище активных SSE-ответов по sessionId
+// Хранилище ответов SSE
 const sessions: Record<string, express.Response> = {};
 
-// SSE endpoint: открывает EventStream и выдаёт sessionId
+// SSE endpoint — открывает EventStream и выдаёт sessionId
 app.get('/mcp', (req, res) => {
   const sessionId = randomUUID();
-  // Устанавливаем заголовки SSE
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders(); // обязательно
+  res.flushHeaders();
 
-  // Сохраняем ответ, чтобы потом шлёть события
   sessions[sessionId] = res;
+  res.write(`event: session\ndata: ${JSON.stringify({ sessionId })}\n\n`);
 
-  // Сообщаем клиенту новый sessionId
-  res.write(`event: session\n`);
-  res.write(`data: ${JSON.stringify({ sessionId })}\n\n`);
-
-  // Чтобы соединение не закрылось (keep-alive)
-  const interval = setInterval(() => res.write(':\n\n'), 15000);
-
-  // При закрытии соединения — убираем из списка
+  const keepAlive = setInterval(() => res.write(':\n\n'), 15000);
   req.on('close', () => {
-    clearInterval(interval);
+    clearInterval(keepAlive);
     delete sessions[sessionId];
   });
 });
 
-// POST endpoint: тут n8n шлёт JSON-RPC запросы (listTools или callTool)
+// POST /mcp — клиент шлёт JSON-RPC запросы
 app.post('/mcp', async (req, res) => {
   const sessionId = req.header('mcp-session-id');
   const sse = sessionId && sessions[sessionId];
@@ -115,37 +107,30 @@ app.post('/mcp', async (req, res) => {
     return res.status(400).json({ error: 'Invalid or missing mcp-session-id' });
   }
 
-  const body = req.body;
-  let response: Response;
-
-  // Парсим и обрабатываем запрос
+  let response;
   try {
-    if (ListToolsRequestSchema.safeParse(body).success) {
+    if (ListToolsRequestSchema.safeParse(req.body).success) {
       response = await listToolsHandler();
     } else {
-      const callReq = CallToolRequestSchema.parse(body) as CallToolRequest;
+      const callReq = CallToolRequestSchema.parse(req.body) as CallToolRequest;
       response = await callToolHandler(callReq);
     }
   } catch (err) {
     response = {
       jsonrpc: '2.0',
-      id: body.id ?? null,
+      id: req.body.id ?? null,
       error: { code: -32603, message: (err as Error).message },
     };
   }
 
-  // Шлём клиенту в SSE-поток
-  sse.write(`event: message\n`);
-  sse.write(`data: ${JSON.stringify(response)}\n\n`);
-
-  // Ничего не возвращаем в теле POST
+  // Отправляем по SSE
+  sse.write(`event: message\ndata: ${JSON.stringify(response)}\n\n`);
   res.status(204).end();
 });
 
 // Для проверки здоровья
 app.get('/health', (_req, res) => res.send('OK'));
 
-// Запуск на порту Render'а
 const port = Number(process.env.PORT) || 3000;
 app.listen(port, '0.0.0.0', () => {
   console.log(`✅ MCP SSE server listening on port ${port}`);
