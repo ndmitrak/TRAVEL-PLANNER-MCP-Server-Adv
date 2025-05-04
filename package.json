@@ -7,12 +7,6 @@
   "homepage": "https://gongrzhe.com",
   "type": "module",
   "main": "dist/index.js",
-  "bin": {
-    "server-travelplanner-mcp": "./dist/index.js"
-  },
-  "files": [
-    "dist"
-  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -23,10 +17,14 @@
     "@googlemaps/google-maps-services-js": "^3.3.41",
     "node-fetch": "^3.3.2",
     "zod": "^3.22.4",
-    "zod-to-json-schema": "^3.22.4"
+    "zod-to-json-schema": "^3.22.4",
+    "express": "^4.19.2",
+    "body-parser": "^1.20.2"
   },
   "devDependencies": {
     "@types/node": "^22",
+    "@types/express": "^4.17.21",
+    "@types/body-parser": "^1.19.2",
     "@types/google.maps": "^3.54.10",
     "typescript": "^5.3.3"
   },
