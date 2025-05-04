@@ -4,9 +4,9 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  Tool,
+  RequestSchema,
+  ResponseSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { Client as GoogleMapsClient } from "@googlemaps/google-maps-services-js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
@@ -70,18 +70,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-
 // --- HTTP server ---
 const app = express();
 app.use(bodyParser.json());
 
 app.post('/', async (req, res) => {
   try {
-    const result = await server.handleRequest(req.body);
-    res.json(result);
+    const parsedRequest = RequestSchema.parse(req.body);
+    const response = await server.dispatch(parsedRequest);
+    res.json(ResponseSchema.parse(response));
   } catch (err) {
-    console.error("Error:", err);
-    res.status(500).json({ error: "Internal Server Error" });
+    console.error("Error handling MCP request:", err);
+    res.status(500).json({
+      error: 'Invalid MCP request',
+      details: err instanceof Error ? err.message : String(err),
+    });
   }
 });
 
