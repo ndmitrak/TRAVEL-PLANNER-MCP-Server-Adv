@@ -1,6 +1,4 @@
-// src/index.ts
-
-import express from "express";
+import express, { Request, Response } from "express";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { randomUUID } from "crypto";
@@ -23,9 +21,9 @@ const OptimizeItinerarySchema = z.object({
 const app = express();
 app.use(express.json());
 
-const sessions: Record<string, express.Response> = {};
+const sessions: Record<string, Response> = {};
 
-app.get("/mcp", (req, res) => {
+app.get("/mcp", (req: Request, res: Response) => {
   const sessionId = randomUUID();
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -42,14 +40,14 @@ app.get("/mcp", (req, res) => {
   });
 });
 
-app.post("/mcp", async (req, res) => {
+app.post("/mcp", async (req: Request, res: Response) => {
   const sessionId = req.header("mcp-session-id");
   const sse = sessionId && sessions[sessionId];
   if (!sse) {
     return res.status(400).json({ error: "Invalid or missing mcp-session-id" });
   }
 
-  let response;
+  let response: any;
 
   try {
     if (ListToolsRequestSchema.safeParse(req.body).success) {
@@ -133,7 +131,7 @@ app.post("/mcp", async (req, res) => {
   res.status(204).end();
 });
 
-app.get("/health", (_req, res) => res.send("OK"));
+app.get("/health", (_req: Request, res: Response) => res.send("OK"));
 
 const port = Number(process.env.PORT) || 10000;
 app.listen(port, () => {
