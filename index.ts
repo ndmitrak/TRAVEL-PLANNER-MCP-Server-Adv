@@ -1,10 +1,10 @@
+// src/index.ts
+
 import express from "express";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { randomUUID } from "crypto";
 import { ListToolsRequestSchema, CallToolRequestSchema, type CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
-
-// ===== Инструменты (Schemas) =====
 
 const CreateItinerarySchema = z.object({
   origin: z.string().describe("Starting location"),
@@ -19,8 +19,6 @@ const OptimizeItinerarySchema = z.object({
   itineraryId: z.string().describe("ID of the itinerary to optimize"),
   optimizationCriteria: z.array(z.string()).describe("Criteria for optimization (time, cost, etc.)"),
 });
-
-// ===== Сервер =====
 
 const app = express();
 app.use(express.json());
@@ -135,10 +133,8 @@ app.post("/mcp", async (req, res) => {
   res.status(204).end();
 });
 
-// healthcheck
 app.get("/health", (_req, res) => res.send("OK"));
 
-// запуск сервера
 const port = Number(process.env.PORT) || 10000;
 app.listen(port, () => {
   console.log(`✅ MCP SSE server listening on port ${port}`);
