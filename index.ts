@@ -1,17 +1,11 @@
-#!/usr/bin/env node
-
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  Tool,
-} from "@modelcontextprotocol/sdk/types.js";
-import { Client as GoogleMapsClient } from "@googlemaps/google-maps-services-js";
+import express from "express";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { randomUUID } from "crypto";
+import { ListToolsRequestSchema, CallToolRequestSchema, type CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 
-// Schema definitions
+// ===== Инструменты (Schemas) =====
+
 const CreateItinerarySchema = z.object({
   origin: z.string().describe("Starting location"),
   destination: z.string().describe("Destination location"),
@@ -26,166 +20,126 @@ const OptimizeItinerarySchema = z.object({
   optimizationCriteria: z.array(z.string()).describe("Criteria for optimization (time, cost, etc.)"),
 });
 
-const SearchAttractionsSchema = z.object({
-  location: z.string().describe("Location to search attractions"),
-  radius: z.number().optional().describe("Search radius in meters"),
-  categories: z.array(z.string()).optional().describe("Categories of attractions"),
+// ===== Сервер =====
+
+const app = express();
+app.use(express.json());
+
+const sessions: Record<string, express.Response> = {};
+
+app.get("/mcp", (req, res) => {
+  const sessionId = randomUUID();
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  sessions[sessionId] = res;
+  res.write(`event: session\ndata: ${JSON.stringify({ sessionId })}\n\n`);
+
+  const keepAlive = setInterval(() => res.write(":\n\n"), 15_000);
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    delete sessions[sessionId];
+  });
 });
 
-const GetTransportOptionsSchema = z.object({
-  origin: z.string().describe("Starting point"),
-  destination: z.string().describe("Destination point"),
-  date: z.string().describe("Travel date (YYYY-MM-DD)"),
-});
+app.post("/mcp", async (req, res) => {
+  const sessionId = req.header("mcp-session-id");
+  const sse = sessionId && sessions[sessionId];
+  if (!sse) {
+    return res.status(400).json({ error: "Invalid or missing mcp-session-id" });
+  }
 
-const GetAccommodationsSchema = z.object({
-  location: z.string().describe("Location to search"),
-  checkIn: z.string().describe("Check-in date (YYYY-MM-DD)"),
-  checkOut: z.string().describe("Check-out date (YYYY-MM-DD)"),
-  budget: z.number().optional().describe("Maximum price per night"),
-});
-
-// Server implementation
-const server = new Server(
-  {
-    name: "travel-planner",
-    version: "0.1.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  },
-);
-
-// Tool handlers
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "create_itinerary",
-      description: "Creates a personalized travel itinerary based on user preferences",
-      inputSchema: zodToJsonSchema(CreateItinerarySchema),
-    },
-    {
-      name: "optimize_itinerary",
-      description: "Optimizes an existing itinerary based on specified criteria",
-      inputSchema: zodToJsonSchema(OptimizeItinerarySchema),
-    },
-    {
-      name: "search_attractions",
-      description: "Searches for attractions and points of interest in a specified location",
-      inputSchema: zodToJsonSchema(SearchAttractionsSchema),
-    },
-    {
-      name: "get_transport_options",
-      description: "Retrieves available transportation options between two points",
-      inputSchema: zodToJsonSchema(GetTransportOptionsSchema),
-    },
-    {
-      name: "get_accommodations",
-      description: "Searches for accommodation options in a specified location",
-      inputSchema: zodToJsonSchema(GetAccommodationsSchema),
-    },
-  ],
-}));
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  let response;
 
   try {
-    switch (name) {
-      case "create_itinerary": {
-        const validatedArgs = CreateItinerarySchema.parse(args);
-        return {
-          content: [
+    if (ListToolsRequestSchema.safeParse(req.body).success) {
+      response = {
+        jsonrpc: "2.0",
+        id: req.body.id ?? null,
+        result: {
+          tools: [
             {
-              type: "text",
-              text: `Created itinerary from ${validatedArgs.origin} to ${validatedArgs.destination}\n` +
-                    `Dates: ${validatedArgs.startDate} to ${validatedArgs.endDate}\n` +
-                    `Budget: ${validatedArgs.budget || "Not specified"}\n` +
-                    `Preferences: ${validatedArgs.preferences?.join(", ") || "None specified"}`,
+              name: "create_itinerary",
+              description: "Creates a personalized travel itinerary",
+              inputSchema: zodToJsonSchema(CreateItinerarySchema),
+            },
+            {
+              name: "optimize_itinerary",
+              description: "Optimizes an existing itinerary",
+              inputSchema: zodToJsonSchema(OptimizeItinerarySchema),
             },
           ],
-        };
-      }
-
-      case "optimize_itinerary": {
-        const validatedArgs = OptimizeItinerarySchema.parse(args);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Optimized itinerary ${validatedArgs.itineraryId} based on: ${validatedArgs.optimizationCriteria.join(", ")}`,
-            },
-          ],
-        };
-      }
-
-      case "search_attractions": {
-        const validatedArgs = SearchAttractionsSchema.parse(args);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Found attractions near ${validatedArgs.location}\n` +
-                    `Radius: ${validatedArgs.radius || "5000"} meters\n` +
-                    `Categories: ${validatedArgs.categories?.join(", ") || "All"}`,
-            },
-          ],
-        };
-      }
-
-      case "get_transport_options": {
-        const validatedArgs = GetTransportOptionsSchema.parse(args);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Transport options from ${validatedArgs.origin} to ${validatedArgs.destination}\n` +
-                    `Date: ${validatedArgs.date}`,
-            },
-          ],
-        };
-      }
-
-      case "get_accommodations": {
-        const validatedArgs = GetAccommodationsSchema.parse(args);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Accommodation options in ${validatedArgs.location}\n` +
-                    `Dates: ${validatedArgs.checkIn} to ${validatedArgs.checkOut}\n` +
-                    `Budget: ${validatedArgs.budget || "Not specified"} per night`,
-            },
-          ],
-        };
-      }
-
-      default:
-        throw new Error(`Unknown tool: ${name}`);
-    }
-  } catch (error) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
         },
-      ],
-      isError: true,
+      };
+    } else {
+      const call = CallToolRequestSchema.parse(req.body) as CallToolRequest;
+      const { name, arguments: args, id } = call.params;
+
+      switch (name) {
+        case "create_itinerary": {
+          const it = CreateItinerarySchema.parse(args);
+          response = {
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: `Created itinerary from ${it.origin} to ${it.destination}\nDates: ${it.startDate} – ${it.endDate}\nBudget: ${it.budget ?? "Not specified"}\nPreferences: ${it.preferences?.join(", ") || "None"}`,
+                },
+              ],
+            },
+          };
+          break;
+        }
+
+        case "optimize_itinerary": {
+          const it = OptimizeItinerarySchema.parse(args);
+          response = {
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: `Optimized itinerary ${it.itineraryId} based on: ${it.optimizationCriteria.join(", ")}`,
+                },
+              ],
+            },
+          };
+          break;
+        }
+
+        default:
+          response = {
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32601, message: `Unknown tool: ${name}` },
+          };
+      }
+    }
+  } catch (err) {
+    response = {
+      jsonrpc: "2.0",
+      id: req.body.id ?? null,
+      error: {
+        code: -32603,
+        message: (err as Error).message,
+      },
     };
   }
+
+  sse.write(`event: message\ndata: ${JSON.stringify(response)}\n\n`);
+  res.status(204).end();
 });
 
-// Start server
-async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Travel Planner MCP Server running on stdio");
-}
+// healthcheck
+app.get("/health", (_req, res) => res.send("OK"));
 
-runServer().catch((error) => {
-  console.error("Fatal error running server:", error);
-  process.exit(1);
-}); 
+// запуск сервера
+const port = Number(process.env.PORT) || 10000;
+app.listen(port, () => {
+  console.log(`✅ MCP SSE server listening on port ${port}`);
+});
